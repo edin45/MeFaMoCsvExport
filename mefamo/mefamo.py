@@ -9,18 +9,22 @@ import time
 import math
 import transforms3d
 import open3d as o3d
+import datetime
+import math
 
 from pylivelinkface import PyLiveLinkFace, FaceBlendShape
 
-from mefamo.utils.drawing import Drawing
-from mefamo.blendshapes.blendshape_calculator import BlendshapeCalculator
+from utils.drawing import Drawing
+from blendshapes.blendshape_calculator import BlendshapeCalculator
 
 # taken from: https://github.com/Rassibassi/mediapipeDemos
-from mefamo.custom.face_geometry import (  # isort:skip
+from custom.face_geometry import (  # isort:skip
     PCF,
     get_metric_landmarks,
     procrustes_landmark_basis,
 )
+
+print("jup")
 
 # points of the face model that will be used for SolvePnP later
 points_idx = [33, 263, 61, 291, 199]
@@ -69,12 +73,19 @@ def calculate_rotation(face_landmarks, pcf: PCF, image_shape):
 
    
 class Mefamo():
-    def __init__(self, input = 0, ip = '127.0.0.1', port = 11111, show_3d = False, hide_image = False, show_debug = False) -> None:
+    def __init__(self, input = 0, output_path = "") -> None:
 
         self.input = input
-        self.show_image = not hide_image
-        self.show_3d = show_3d
-        self.show_debug = show_debug
+        self.csv_out = "Timecode,BlendShapeCount,EyeBlinkLeft,EyeLookDownLeft,EyeLookInLeft,EyeLookOutLeft,EyeLookUpLeft,EyeSquintLeft,EyeWideLeft,EyeBlinkRight,EyeLookDownRight,EyeLookInRight,EyeLookOutRight,EyeLookUpRight,EyeSquintRight,EyeWideRight,JawForward,JawRight,JawLeft,JawOpen,MouthClose,MouthFunnel,MouthPucker,MouthRight,MouthLeft,MouthSmileLeft,MouthSmileRight,MouthFrownLeft,MouthFrownRight,MouthDimpleLeft,MouthDimpleRight,MouthStretchLeft,MouthStretchRight,MouthRollLower,MouthRollUpper,MouthShrugLower,MouthShrugUpper,MouthPressLeft,MouthPressRight,MouthLowerDownLeft,MouthLowerDownRight,MouthUpperUpLeft,MouthUpperUpRight,BrowDownLeft,BrowDownRight,BrowInnerUp,BrowOuterUpLeft,BrowOuterUpRight,CheekPuff,CheekSquintLeft,CheekSquintRight,NoseSneerLeft,NoseSneerRight,TongueOut,HeadYaw,HeadPitch,HeadRoll,LeftEyeYaw,LeftEyePitch,LeftEyeRoll,RightEyeYaw,RightEyePitch,RightEyeRoll"
+        self.output_path = output_path
+        self.batch_size = 1000
+        self.batch_counter = 0
+        self.out_file = open("facial_mocap_out.csv", "w")
+        self.out_file.write("")
+        self.out_file.close()
+        self.out_file = open("facial_mocap_out.csv", "a")
+        self.timestamp = str(datetime.datetime.now()).split('.')[0].split(' ')[1] + ":" + str(round(int(str(datetime.datetime.now()).split('.')[1]) / 10000))
+        self.totalNoFrames = 0
 
         self.face_mesh = face_mesh.FaceMesh(
             max_num_faces=1,
@@ -85,8 +96,8 @@ class Mefamo():
         self.live_link_face = PyLiveLinkFace(fps = 30, filter_size = 4)
         self.blendshape_calulator = BlendshapeCalculator()
 
-        self.ip = ip
-        self.upd_port = port
+        # self.ip = ip
+        # self.upd_port = port
         
         self.image_height, self.image_width, channels = (480, 640, 3)
 
@@ -108,8 +119,6 @@ class Mefamo():
         self.drawing_spec = drawing_utils.DrawingSpec(thickness=1, circle_radius=1)        
         self.lock = threading.Lock()
         self.got_new_data = False
-        self.network_data = b''
-        self.network_thread = threading.Thread(target=self._network_loop, daemon=True)
         self.image = None
     
     # starts the program and all its threads
@@ -117,10 +126,13 @@ class Mefamo():
         cap = None
         image = None
 
+        
+
         # check if input is an image        
         if isinstance(self.input, str) and (self.input.lower().endswith(".jpg") or self.input.lower().endswith(".png")):
             image = cv2.imread(self.input)
-            self.file = True   
+            self.file = True
+            print("so its a jpg")
         else:   
             input = self.input  
             try:
@@ -134,41 +146,39 @@ class Mefamo():
         else:
             cap = cv2.VideoCapture(input)                
 
+
+        self.totalNoFrames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.image_width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.image_height)
-        
-        # run the network loop in a separate thread
-        self.network_thread.start()
+
+        i=0
+
+        start_timestamp = round(time.time() * 1000)
 
         if cap is not None:
             # for camera and videos
             while cap.isOpened():
                 success, image = cap.read()
+                
                 if not success:
-                    print("Ignoring empty camera frame.")
-                    continue
-                if not self._process_image(image):
+                    break
+                print(f"Frame: {i+1}/{self.totalNoFrames}")
+                if not self._process_image(image,i):
                     break    
-            print("Video capture received no more frames.")                
+                i+=1
             cap.release()
+            self.out_file.write(self.csv_out)
+            self.out_file.close()
+            print(f"Done, took: {round(time.time() * 1000)-start_timestamp} ms")
         
         else:
             # for input images
             while image is not None:
-                if not self._process_image(image):
+                if not self._process_image(image,i):
                     break
 
-    def _network_loop(self):
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:            
-            s.connect((self.ip, self.upd_port))
-            while True: 
-                with self.lock:
-                    if self.got_new_data:                               
-                        s.sendall(self.network_data)
-                        self.got_new_data = False
-                time.sleep(0.01)
-
-    def _process_image(self, image):   
+    def _process_image(self, image, index):   
         # To improve performance, optionally mark the image as not writeable to
         # pass by reference.
         image.flags.writeable = False
@@ -183,9 +193,6 @@ class Mefamo():
             for face_landmarks in results.multi_face_landmarks:
 
                 pose_transform_mat, metric_landmarks, rotation_vector, translation_vector = calculate_rotation(face_landmarks, self.pcf, image.shape)  
-                # draw a 3d image of the face
-                if self.show_3d:
-                    face_image_3d = Drawing.draw_3d_face(metric_landmarks, image)
 
                 # draw the face mesh 
                 drawing_utils.draw_landmarks(
@@ -234,29 +241,38 @@ class Mefamo():
         font_scale = 0.50
         color = (0, 255, 0)
 
-        if self.show_image:
-            cv2.imshow('MediaPipe Face Mesh', image.astype('uint8'))  
-            if face_image_3d is not None and type(face_image_3d) == o3d.geometry.Image: 
-                # show the 3d image if it exists
-                img_3d = np.asarray(face_image_3d)
-                img_3d = cv2.flip(img_3d, 1)
-                cv2.imshow('Open3D Image', np.asarray(face_image_3d)) 
+        #put code for writing into csv variable
 
-            if self.show_debug:
-                for shape in FaceBlendShape:
-                    shape_debug_text = f'{shape.name}: {self.live_link_face.get_blendshape(FaceBlendShape(shape.value)):.3f}'
-                    cv2.putText(img=white_bg, text=shape_debug_text, org=tuple(text_coordinates), fontFace=font, fontScale=font_scale, color=color, thickness=1)
-                    text_coordinates[1] += 20
-                    if shape.value == 30: #start new column
-                        text_coordinates = [300, 25]
+        # if self.show_image:
+        # cv2.imshow('MediaPipe Face Mesh', image.astype('uint8'))  
+        # if face_image_3d is not None and type(face_image_3d) == o3d.geometry.Image: 
+        #     # show the 3d image if it exists
+        #     img_3d = np.asarray(face_image_3d)
+        #     img_3d = cv2.flip(img_3d, 1)
+        #     cv2.imshow('Open3D Image', np.asarray(face_image_3d)) 
 
-                cv2.imshow('Debug', white_bg)
+            
+        # for shape in FaceBlendShape:
+            # print("shape: " + str(shape))
+            # self.live_link_face.get_blendshape(FaceBlendShape(shape.value))
+            # shape_debug_text = f'{shape.name}: {self.live_link_face.get_blendshape(FaceBlendShape(shape.value)):.3f}'
+            # cv2.putText(img=white_bg, text=shape_debug_text, org=tuple(text_coordinates), fontFace=font, fontScale=font_scale, color=color, thickness=1)
+            # text_coordinates[1] += 20
+            # if shape.value == 30: #start new column 
+            #     text_coordinates = [300, 25]
 
-            if cv2.waitKey(1) & 0xFF == 27:
-                return False
+            # if self.show_debug:
+            #     cv2.imshow('Debug', white_bg)
 
-        with self.lock:
-            self.got_new_data = True
-            self.network_data = self.live_link_face.encode()
+        # if cv2.waitKey(1) & 0xFF == 27:
+        #     return False
+
+        if self.batch_counter == self.batch_size:
+            self.out_file.write(self.csv_out)
+            self.csv_out = f"\n{self.timestamp}.{index},61,{self.live_link_face.get_blendshape(FaceBlendShape.EyeBlinkLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.EyeLookDownLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.EyeLookInLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.EyeLookOutLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.EyeLookUpLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.EyeSquintLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.EyeWideLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.EyeBlinkRight)},{self.live_link_face.get_blendshape(FaceBlendShape.EyeLookDownRight)},{self.live_link_face.get_blendshape(FaceBlendShape.EyeLookInRight)},{self.live_link_face.get_blendshape(FaceBlendShape.EyeLookOutRight)},{self.live_link_face.get_blendshape(FaceBlendShape.EyeLookUpRight)},{self.live_link_face.get_blendshape(FaceBlendShape.EyeSquintRight)},{self.live_link_face.get_blendshape(FaceBlendShape.EyeWideRight)},{self.live_link_face.get_blendshape(FaceBlendShape.JawForward)},{self.live_link_face.get_blendshape(FaceBlendShape.JawRight)},{self.live_link_face.get_blendshape(FaceBlendShape.JawLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.JawOpen)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthClose)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthFunnel)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthPucker)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthRight)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthSmileLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthSmileRight)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthFrownLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthFrownRight)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthDimpleLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthDimpleRight)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthStretchLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthStretchRight)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthRollLower)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthRollUpper)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthShrugLower)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthShrugUpper)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthPressLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthPressRight)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthLowerDownLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthLowerDownRight)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthUpperUpLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthUpperUpRight)},{self.live_link_face.get_blendshape(FaceBlendShape.BrowDownLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.BrowDownRight)},{self.live_link_face.get_blendshape(FaceBlendShape.BrowInnerUp)},{self.live_link_face.get_blendshape(FaceBlendShape.BrowOuterUpLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.BrowOuterUpRight)},{self.live_link_face.get_blendshape(FaceBlendShape.CheekPuff)},{self.live_link_face.get_blendshape(FaceBlendShape.CheekSquintLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.CheekSquintRight)},{self.live_link_face.get_blendshape(FaceBlendShape.NoseSneerLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.NoseSneerRight)},{self.live_link_face.get_blendshape(FaceBlendShape.TongueOut)},{self.live_link_face.get_blendshape(FaceBlendShape.HeadYaw)},{self.live_link_face.get_blendshape(FaceBlendShape.HeadPitch)},{self.live_link_face.get_blendshape(FaceBlendShape.HeadRoll)},{self.live_link_face.get_blendshape(FaceBlendShape.LeftEyeYaw)},{self.live_link_face.get_blendshape(FaceBlendShape.LeftEyePitch)},{self.live_link_face.get_blendshape(FaceBlendShape.LeftEyeRoll)},{self.live_link_face.get_blendshape(FaceBlendShape.RightEyeYaw)},{self.live_link_face.get_blendshape(FaceBlendShape.RightEyePitch)},{self.live_link_face.get_blendshape(FaceBlendShape.RightEyeRoll)}"
+            self.batch_counter = 0
+        else:
+            self.csv_out += f"\n{self.timestamp}.{index},61,{self.live_link_face.get_blendshape(FaceBlendShape.EyeBlinkLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.EyeLookDownLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.EyeLookInLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.EyeLookOutLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.EyeLookUpLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.EyeSquintLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.EyeWideLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.EyeBlinkRight)},{self.live_link_face.get_blendshape(FaceBlendShape.EyeLookDownRight)},{self.live_link_face.get_blendshape(FaceBlendShape.EyeLookInRight)},{self.live_link_face.get_blendshape(FaceBlendShape.EyeLookOutRight)},{self.live_link_face.get_blendshape(FaceBlendShape.EyeLookUpRight)},{self.live_link_face.get_blendshape(FaceBlendShape.EyeSquintRight)},{self.live_link_face.get_blendshape(FaceBlendShape.EyeWideRight)},{self.live_link_face.get_blendshape(FaceBlendShape.JawForward)},{self.live_link_face.get_blendshape(FaceBlendShape.JawRight)},{self.live_link_face.get_blendshape(FaceBlendShape.JawLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.JawOpen)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthClose)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthFunnel)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthPucker)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthRight)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthSmileLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthSmileRight)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthFrownLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthFrownRight)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthDimpleLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthDimpleRight)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthStretchLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthStretchRight)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthRollLower)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthRollUpper)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthShrugLower)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthShrugUpper)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthPressLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthPressRight)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthLowerDownLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthLowerDownRight)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthUpperUpLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.MouthUpperUpRight)},{self.live_link_face.get_blendshape(FaceBlendShape.BrowDownLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.BrowDownRight)},{self.live_link_face.get_blendshape(FaceBlendShape.BrowInnerUp)},{self.live_link_face.get_blendshape(FaceBlendShape.BrowOuterUpLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.BrowOuterUpRight)},{self.live_link_face.get_blendshape(FaceBlendShape.CheekPuff)},{self.live_link_face.get_blendshape(FaceBlendShape.CheekSquintLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.CheekSquintRight)},{self.live_link_face.get_blendshape(FaceBlendShape.NoseSneerLeft)},{self.live_link_face.get_blendshape(FaceBlendShape.NoseSneerRight)},{self.live_link_face.get_blendshape(FaceBlendShape.TongueOut)},{self.live_link_face.get_blendshape(FaceBlendShape.HeadYaw)},{self.live_link_face.get_blendshape(FaceBlendShape.HeadPitch)},{self.live_link_face.get_blendshape(FaceBlendShape.HeadRoll)},{self.live_link_face.get_blendshape(FaceBlendShape.LeftEyeYaw)},{self.live_link_face.get_blendshape(FaceBlendShape.LeftEyePitch)},{self.live_link_face.get_blendshape(FaceBlendShape.LeftEyeRoll)},{self.live_link_face.get_blendshape(FaceBlendShape.RightEyeYaw)},{self.live_link_face.get_blendshape(FaceBlendShape.RightEyePitch)},{self.live_link_face.get_blendshape(FaceBlendShape.RightEyeRoll)}"
+            self.batch_counter+=1
 
         return True
